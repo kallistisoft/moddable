@@ -1,4 +1,6 @@
 /*
+ * Copyright (c) 2023  Pocuter Inc. -- QSPI Implementation
+ *
  * Copyright (c) 2016-2019  Moddable Tech, Inc.
  *
  *   This file is part of the Moddable SDK Runtime.
@@ -44,6 +46,11 @@ struct modSPIConfigurationRecord {
 	uint8_t						clock_pin;
 	uint8_t						mosi_pin;
 	uint8_t						miso_pin;
+	uint8_t						io0_pin;
+	uint8_t						io1_pin;
+	uint8_t						io2_pin;
+	uint8_t						io3_pin;
+	bool						quad;
 };
 
 typedef struct modSPIConfigurationRecord modSPIConfigurationRecord;
@@ -58,7 +65,12 @@ typedef struct modSPIConfigurationRecord *modSPIConfiguration;
 	config.mode = 0; \
 	config.clock_pin = 254; \
 	config.mosi_pin = 254; \
-	config.miso_pin = 254;
+	config.miso_pin = 254; \
+	config.io0_pin = 255; \
+	config.io1_pin = 255; \
+	config.io2_pin = 255; \
+	config.io3_pin = 255; \
+	config.quad = false;
 
 extern void modSPIInit(modSPIConfiguration config);
 extern void modSPIUninit(modSPIConfiguration config);

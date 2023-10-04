@@ -1,7 +1,9 @@
 /*
+ * Copyright (c) 2023  Pocuter Inc. -- QSPI Implementation
+ *
  * Copyright (c) 2016-2021  Moddable Tech, Inc.
  *
- *   This file is part of the Moddable SDK Runtime.
+ *   This file is part of the Moddable SDK Runtime.modSPITxRx
  * 
  *   The Moddable SDK Runtime is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU Lesser General Public License as published by
@@ -47,6 +49,7 @@
 #ifndef MODDEF_SPI_ESP32_TRANSACTIONSIZE
 	#define MODDEF_SPI_ESP32_TRANSACTIONSIZE (1024)
 #endif
+
 
 typedef uint32_t (*modSPIBufferLoader)(uint8_t *data, uint32_t bytes, uint32_t *bitsOut);
 
@@ -162,13 +165,23 @@ void modSPIInit(modSPIConfiguration config)
         gSPITransactionBuffer[0] = heap_caps_malloc(SPI_BUFFER_SIZE * kTransactions, MALLOC_CAP_DMA);      // use DMA capable memory for SPI driver
         for (i = 1; i < kTransactions; i++)
             gSPITransactionBuffer[i] = (uint32_t *)(SPI_BUFFER_SIZE + (uint8_t *)gSPITransactionBuffer[i - 1]);
+		
 		memset(&buscfg, 0, sizeof(buscfg));
-		buscfg.miso_io_num = (254 == config->miso_pin) ? MODDEF_SPI_MISO_PIN : ((255 == config->miso_pin) ? -1 : config->miso_pin);
-		buscfg.mosi_io_num = (254 == config->mosi_pin) ? MODDEF_SPI_MOSI_PIN : ((255 == config->mosi_pin) ? -1 : config->mosi_pin);
+		buscfg.max_transfer_sz = MODDEF_SPI_ESP32_TRANSACTIONSIZE;
 		buscfg.sclk_io_num = (254 == config->clock_pin) ? MODDEF_SPI_SCK_PIN : ((255 == config->clock_pin) ? -1 : config->clock_pin);
-		buscfg.quadwp_io_num = -1;
-		buscfg.quadhd_io_num = -1;
-        buscfg.max_transfer_sz = MODDEF_SPI_ESP32_TRANSACTIONSIZE;
+
+		if( config->quad ) {
+			buscfg.data0_io_num = (255 == config->io0_pin) ? -1 : config->io0_pin;
+			buscfg.data1_io_num = (255 == config->io1_pin) ? -1 : config->io1_pin;
+			buscfg.data2_io_num = (255 == config->io2_pin) ? -1 : config->io2_pin;
+			buscfg.data3_io_num = (255 == config->io3_pin) ? -1 : config->io3_pin;
+			buscfg.flags = SPICOMMON_BUSFLAG_QUAD;
+		} else {
+			buscfg.miso_io_num = (254 == config->miso_pin) ? MODDEF_SPI_MISO_PIN : ((255 == config->miso_pin) ? -1 : config->miso_pin);
+			buscfg.mosi_io_num = (254 == config->mosi_pin) ? MODDEF_SPI_MOSI_PIN : ((255 == config->mosi_pin) ? -1 : config->mosi_pin);
+			buscfg.quadwp_io_num = -1;
+			buscfg.quadhd_io_num = -1;
+		}
 
 	#if kCPUESP32S3 || kCPUESP32C3 || kCPUESP32C6
 		ret = spi_bus_initialize(config->spiPort, &buscfg, SPI_DMA_CH_AUTO);
@@ -199,6 +212,8 @@ void modSPIInit(modSPIConfiguration config)
 	devcfg.pre_cb = NULL;
 	devcfg.post_cb = postTransfer;
 	devcfg.input_delay_ns = config->miso_delay;
+
+	if( config->quad ) devcfg.flags = SPI_DEVICE_HALFDUPLEX;
 
 	ret = spi_bus_add_device(config->spiPort, &devcfg, &config->spi_dev);
 	if (ret) {
