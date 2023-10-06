@@ -32,6 +32,8 @@
 
 #include "modSPI.h"
 
+xsMachine *gThe;
+
 // Timing Delays
 #define SH8601Z_DELAYS_HWFILL	    (3)
 #define SH8601Z_DELAYS_HWLINE       (1)
@@ -62,6 +64,8 @@
 #define SH8601Z_CMD_BRIGHTNESS		0x51
 #define SH8601Z_CMD_CTRL1			0x53
 
+#define SH8601Z_CMD_SPIMODE			0xC4
+
 #define SH8601Z_CMD_NULL			0x00
 
 #ifndef MODDEF_SH8601Z_CS_PORT
@@ -84,13 +88,14 @@
 #ifndef MODDEF_SH8601Z_INITIALIZATION
 /* Default init sequence: 128x128 */
 static const uint8_t gSH8601ZInitialization[] = {
+	//SH8601Z_CMD_SPIMODE, 1, 0x00,
 	SH8601Z_CMD_SLEEPOUT, 0,
-	SH8601Z_CMD_PIXELFORMAT, 1, 0x05,
+	SH8601Z_CMD_NORMALDISPLAY, 0,	
+	SH8601Z_CMD_PIXELFORMAT, 1, 0x55,
 	SH8601Z_CMD_CTRL1, 1, 0x20,
-	SH8601Z_CMD_BRIGHTNESS, 1, 0x00, 0x00,
+	SH8601Z_CMD_BRIGHTNESS, 1, 0x00,
 	SH8601Z_CMD_DISPLAYON, 0,
-	SH8601Z_CMD_BRIGHTNESS, 2, 0xFF, 0x00,
-	SH8601Z_CMD_DISPLAYALLON, 0,
+	SH8601Z_CMD_BRIGHTNESS, 1, 0xFF,
 	SH8601Z_CMD_NULL
 };
 #else
@@ -132,6 +137,9 @@ typedef struct {
 #endif
 } spiDisplayRecord, *spiDisplay;
 
+
+static bool g_IsStreaming = false;
+
 static void sh8601zChipSelect(uint8_t active, modSPIConfiguration config);
 
 static void sh8601zInit(spiDisplay sd);
@@ -166,6 +174,8 @@ void xs_sh8601z_destructor(void *data)
 
 void xs_sh8601z(xsMachine *the)
 {
+	gThe = the;
+	xsLog("xs_sh8601z()\n");
 	spiDisplay sd;
 
 	sd = c_calloc(1, sizeof(spiDisplayRecord));
@@ -174,8 +184,8 @@ void xs_sh8601z(xsMachine *the)
 
 	xsmcSetHostData(xsThis, sd);
 
-	modSPIConfig(sd->spiConfig, MODDEF_SH8601Z_HZ, MODDEF_SH8601Z_SPI_PORT,
-			MODDEF_SH8601Z_CS_PORT, MODDEF_SH8601Z_CS_PIN, sh8601zChipSelect);
+	// initialize spi driver -- CS pin is controlled manually
+	modSPIConfig(sd->spiConfig, MODDEF_SH8601Z_HZ, MODDEF_SH8601Z_SPI_PORT, 0, 0, NULL );
 
 	sd->dispatch = (PixelsOutDispatch)&gPixelsOutDispatch_16BE;
 
@@ -184,6 +194,7 @@ void xs_sh8601z(xsMachine *the)
 
 void xs_sh8601z_begin(xsMachine *the)
 {
+	xsLog("xs_sh8601z_begin()\n");
 	spiDisplay sd = xsmcGetHostData(xsThis);
 	CommodettoCoordinate x = (CommodettoCoordinate)xsmcToInteger(xsArg(0));
 	CommodettoCoordinate y = (CommodettoCoordinate)xsmcToInteger(xsArg(1));
@@ -195,6 +206,7 @@ void xs_sh8601z_begin(xsMachine *the)
 
 void xs_sh8601z_send(xsMachine *the)
 {
+	xsLog("xs_sh8601z_send()\n");
 	spiDisplay sd = xsmcGetHostData(xsThis);
 	int argc = xsmcArgc;
 	const uint8_t *data;
@@ -263,6 +275,7 @@ void xs_sh8601z_get_c_dispatch(xsMachine *the)
 // caller provides little-endian pixels, convert to big-endian for display
 void sh8601zSend_16LE(PocoPixel *pixels, int byteLength, void *refcon)
 {
+	fxReport(gThe, "sh8601zSend_16LE(...)\n");
 	spiDisplay sd = refcon;
 	modSPITxSwap16(&sd->spiConfig, (void *)pixels, (byteLength < 0) ? -byteLength : byteLength);
 }
@@ -270,26 +283,50 @@ void sh8601zSend_16LE(PocoPixel *pixels, int byteLength, void *refcon)
 
 void sh8601zCommand(spiDisplay sd, uint8_t command, const uint8_t *data, uint16_t count)
 {
+	fxReport(gThe, "sh8601zCommand(...)\n");
 	/* HACK */
 	modSPIFlush();
 
-	// format 32-byte aligned command segment
-	uint8_t cmd32[4];
-	cmd32[0] = 0x02;
-	cmd32[1] = 0x00;
-	cmd32[2] = command;
-	cmd32[4] = 0x00;
+	// 32-bit aligned command segment + 32-byte data buffer
+	uint8_t cmd32_data[ 4 + 32 ];
+	memset(&cmd32_data, 0x00, sizeof(cmd32_data));
 
-	// send 32-byte aligned command packet
-	modSPITxRx(&sd->spiConfig, (uint8_t *)&cmd32, sizeof(data));		// could use modSPITx, but modSPITxRx is synchronous and callers rely on that
+	// format command header (LSB)
+	cmd32_data[0] = 0x02;
+	cmd32_data[1] = 0x00;
+	cmd32_data[2] = command;
+	cmd32_data[3] = 0x00;
 
-	if (count) {
-		modSPITxRx(&sd->spiConfig, (uint8_t *)data, count);
+	// truncate command data length to 32-bytes
+	// and copy data to packet buffer
+	if( count > 32 ) count = 32;
+	if( count ) c_memcpy(&cmd32_data[4], data, count );
+
+	// sync send 32-byte aligned command packet and data
+	SCREEN_CS_ACTIVE;
+	modSPITxRx(&sd->spiConfig, (uint8_t *)&cmd32_data, 4 + count );
+	if( !g_IsStreaming ) SCREEN_CS_DEACTIVE;
+}
+
+void xs_sh8601z_command(xsMachine *the)
+{
+	xsLog("xs_sh8601z_command()\n");
+	spiDisplay sd = xsmcGetHostData(xsThis);
+	uint8_t command = (uint8_t)xsmcToInteger(xsArg(0));
+	uint16_t dataSize = 0;
+	uint8_t *data = NULL;
+
+	if (xsmcArgc > 1) {
+		dataSize = (uint16_t)xsmcGetArrayBufferLength(xsArg(1));
+		data = xsmcToArrayBuffer(xsArg(1));
 	}
+
+	sh8601zCommand(sd, command, data, dataSize);
 }
 
 void sh8601zInit(spiDisplay sd)
 {
+	fxReport(gThe, "sh8601zInit(...)\n");
 	uint8_t i = 0;
 
 	SCREEN_CS_INIT;
@@ -297,13 +334,12 @@ void sh8601zInit(spiDisplay sd)
 
 	modSPIInit(&sd->spiConfig);
 
-	SCREEN_CS_ACTIVE;
 	SCREEN_RST_DEACTIVE;
-	modDelayMicroseconds(100);
+	modDelayMicroseconds(10000);
 	SCREEN_RST_ACTIVE;
-	modDelayMicroseconds(100);
+	modDelayMicroseconds(10000);
 	SCREEN_RST_DEACTIVE;
-	modDelayMicroseconds(100);
+	modDelayMicroseconds(10000);
 
 	while (i < sizeof (gSH8601ZInitialization)) {
 		uint8_t command, count;
@@ -320,6 +356,7 @@ void sh8601zInit(spiDisplay sd)
 		}
 
 		sh8601zCommand(sd, command, data, count);
+		modDelayMicroseconds( 1000 );
 	}
 
 	SCREEN_CS_DEACTIVE;
@@ -327,16 +364,20 @@ void sh8601zInit(spiDisplay sd)
 
 void sh8601zChipSelect(uint8_t active, modSPIConfiguration config)
 {
+	fxReport(gThe, "sh8601zChipSelect(...)\n");
+	return;
 	spiDisplay sd = (spiDisplay)(((char *)config) - offsetof(spiDisplayRecord, spiConfig));
 
 	if (active)
 		SCREEN_CS_ACTIVE;
-	else
+	else if( !g_IsStreaming )
 		SCREEN_CS_DEACTIVE;
 }
 
 void sh8601zBegin(void *refcon, CommodettoCoordinate x, CommodettoCoordinate y, CommodettoDimension w, CommodettoDimension h)
 {
+	fxReport(gThe, "sh8601zBegin(...)\n");
+
 	spiDisplay sd = refcon;
 	uint8_t data[4];
 	uint16_t xMin, xMax, yMin, yMax;
@@ -357,7 +398,8 @@ void sh8601zBegin(void *refcon, CommodettoCoordinate x, CommodettoCoordinate y, 
 	data[2] = yMax >> 8;
 	data[3] = yMax & 0xFF;
 	sh8601zCommand(sd, SH8601Z_CMD_SETROW, data, sizeof(data));
-
+	
+	g_IsStreaming = true;
 	sh8601zCommand(sd, SH8601Z_CMD_WRITERAM, NULL, 0);
 }
 
@@ -368,4 +410,7 @@ void sh8601zContinue(void *refcon)
 
 void sh8601zEnd(void *refcon)
 {
+	spiDisplay sd = refcon;
+	g_IsStreaming = false;
+	SCREEN_CS_DEACTIVE;
 }

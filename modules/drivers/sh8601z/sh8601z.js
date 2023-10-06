@@ -50,6 +50,9 @@ export default class SH8601Z @ "xs_sh8601z_destructor" {
 	set clut() @ "xs_sh8601z_set_clut";
 
 	get c_dispatch() @ "xs_sh8601z_get_c_dispatch";
+	
+	// driver specific
+	command(id, data) @ "xs_sh8601z_command";	
 }
 
 Object.freeze(SH8601Z.prototype);

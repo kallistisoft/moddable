@@ -257,11 +257,11 @@ void modSPIActivateConfiguration(modSPIConfiguration config)
 	if (config == gConfig)
 		return;
 
-	if (gConfig)
+	if (gConfig && gConfig->doChipSelect != NULL )
 		(gConfig->doChipSelect)(0, gConfig);
 
 	gConfig = config;
-	if (gConfig)
+	if (gConfig && gConfig->doChipSelect != NULL )
 		(gConfig->doChipSelect)(1, gConfig);
 }
 
