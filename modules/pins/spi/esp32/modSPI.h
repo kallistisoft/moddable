@@ -36,6 +36,7 @@ typedef void (*modSPIChipSelectCallback)(uint8_t active, modSPIConfiguration con
 
 struct modSPIConfigurationRecord {
 	spi_device_handle_t			spi_dev;
+	spi_device_handle_t			qspi_dev;
 	int8_t						cs_pin;
 	uint8_t						spiPort;
 	uint8_t						sync;
@@ -57,6 +58,8 @@ typedef struct modSPIConfigurationRecord modSPIConfigurationRecord;
 typedef struct modSPIConfigurationRecord *modSPIConfiguration;
 
 #define modSPIConfig(config, HZ, SPI_PORT, CS_PORT, CS_PIN, DOCHIPSELECT) \
+	config.spi_dev = NULL; \
+	config.qspi_dev = NULL; \
 	config.hz = HZ; \
 	config.cs_pin = CS_PIN; \
 	config.doChipSelect = DOCHIPSELECT; \
@@ -66,10 +69,10 @@ typedef struct modSPIConfigurationRecord *modSPIConfiguration;
 	config.clock_pin = 254; \
 	config.mosi_pin = 254; \
 	config.miso_pin = 254; \
-	config.io0_pin = 255; \
-	config.io1_pin = 255; \
-	config.io2_pin = 255; \
-	config.io3_pin = 255; \
+	config.io0_pin = 254; \
+	config.io1_pin = 254; \
+	config.io2_pin = 254; \
+	config.io3_pin = 254; \
 	config.quad = false;
 
 extern void modSPIInit(modSPIConfiguration config);

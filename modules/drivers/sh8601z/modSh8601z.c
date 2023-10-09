@@ -32,11 +32,9 @@
 
 #include "modSPI.h"
 
-xsMachine *gThe;
-
-// Timing Delays
-#define SH8601Z_DELAYS_HWFILL	    (3)
-#define SH8601Z_DELAYS_HWLINE       (1)
+#define modLog(foo)
+#define modLogInt(foo)
+#define modLogHex(foo)
 
 // SH8601Z Commands
 #define SH8601Z_CMD_SLEEPIN			0x10
@@ -81,14 +79,15 @@ xsMachine *gThe;
 	#define MODDEF_SH8601Z_OFFSET_ROW (0)
 #endif
 #ifndef MODDEF_SH8601Z_HZ
-	//#define MODDEF_SH8601Z_HZ (10000000)
-	#define MODDEF_SH8601Z_HZ (2500000)
+	#define MODDEF_SH8601Z_HZ (20000000)
+#endif
+#ifndef MODDEF_SH8601Z_QSPI
+	#define MODDEF_SH8601Z_QSPI (0)
 #endif
 
 #ifndef MODDEF_SH8601Z_INITIALIZATION
 /* Default init sequence: 128x128 */
 static const uint8_t gSH8601ZInitialization[] = {
-	//SH8601Z_CMD_SPIMODE, 1, 0x00,
 	SH8601Z_CMD_SLEEPOUT, 0,
 	SH8601Z_CMD_NORMALDISPLAY, 0,	
 	SH8601Z_CMD_PIXELFORMAT, 1, 0x55,
@@ -139,11 +138,16 @@ typedef struct {
 
 
 static bool g_IsStreaming = false;
+static uint8_t g_ScreenBrightness = 0;
+static uint8_t g_ScreenRotation = 0;
+static bool g_IsScreenAwake = false;
+static bool g_IsScreenEnabled = false;
+
 
 static void sh8601zChipSelect(uint8_t active, modSPIConfiguration config);
 
 static void sh8601zInit(spiDisplay sd);
-static void sh8601zCommand(spiDisplay sd, uint8_t command, const uint8_t *data, uint16_t count);
+static void sh8601zCommand(spiDisplay sd, uint8_t command, const uint8_t *data, uint16_t count, bool qspi);
 
 static void sh8601zBegin(void *refcon, CommodettoCoordinate x, CommodettoCoordinate y, CommodettoDimension w, CommodettoDimension h);
 static void sh8601zContinue(void *refcon);
@@ -167,15 +171,27 @@ void xs_sh8601z_destructor(void *data)
 {
 	if (data) {
 		spiDisplay sd = (spiDisplay)data;
+
+		uint8_t byte = 0;
+		sh8601zCommand( sd, SH8601Z_CMD_BRIGHTNESS, &byte, 1, false );
+		sh8601zCommand( sd, SH8601Z_CMD_DISPLAYOFF, NULL, 0, false );
+		sh8601zCommand( sd, SH8601Z_CMD_SLEEPIN, NULL, 0, false );
+
 		modSPIUninit(&sd->spiConfig);
 		c_free(data);
 	}
+
+	// clear initial state values
+	g_IsStreaming = false;
+	g_ScreenBrightness = 0;
+	g_ScreenRotation = 0;
+	g_IsScreenEnabled = false;	
+	g_IsScreenAwake = false;
 }
 
 void xs_sh8601z(xsMachine *the)
 {
-	gThe = the;
-	xsLog("xs_sh8601z()\n");
+	modLog("xs_sh8601z()");
 	spiDisplay sd;
 
 	sd = c_calloc(1, sizeof(spiDisplayRecord));
@@ -185,16 +201,28 @@ void xs_sh8601z(xsMachine *the)
 	xsmcSetHostData(xsThis, sd);
 
 	// initialize spi driver -- CS pin is controlled manually
-	modSPIConfig(sd->spiConfig, MODDEF_SH8601Z_HZ, MODDEF_SH8601Z_SPI_PORT, 0, 0, NULL );
+	modSPIConfig(sd->spiConfig, MODDEF_SH8601Z_HZ, MODDEF_SH8601Z_SPI_PORT, 0, -1, NULL );
 
+	// enable QSPI driver mode
+	if( MODDEF_SH8601Z_QSPI )
+		sd->spiConfig.quad = true;
+
+	// assign dispatch method
 	sd->dispatch = (PixelsOutDispatch)&gPixelsOutDispatch_16BE;
 
 	sh8601zInit(sd);
+
+	// set initial state values
+	g_IsStreaming = false;
+	g_ScreenBrightness = 255;
+	g_ScreenRotation = 0;
+	g_IsScreenEnabled = true;	
+	g_IsScreenAwake = true;
 }
 
 void xs_sh8601z_begin(xsMachine *the)
 {
-	xsLog("xs_sh8601z_begin()\n");
+	modLog("xs_sh8601z_begin()");
 	spiDisplay sd = xsmcGetHostData(xsThis);
 	CommodettoCoordinate x = (CommodettoCoordinate)xsmcToInteger(xsArg(0));
 	CommodettoCoordinate y = (CommodettoCoordinate)xsmcToInteger(xsArg(1));
@@ -206,7 +234,7 @@ void xs_sh8601z_begin(xsMachine *the)
 
 void xs_sh8601z_send(xsMachine *the)
 {
-	xsLog("xs_sh8601z_send()\n");
+	modLog("xs_sh8601z_send()");
 	spiDisplay sd = xsmcGetHostData(xsThis);
 	int argc = xsmcArgc;
 	const uint8_t *data;
@@ -256,6 +284,48 @@ void xs_sh8601z_get_height(xsMachine *the)
 	xsmcSetInteger(xsResult, MODDEF_SH8601Z_HEIGHT);
 }
 
+void xs_sh8601z_get_brightness(xsMachine *the) {
+	xsmcSetInteger(xsResult, g_ScreenBrightness );
+}
+
+void xs_sh8601z_set_brightness(xsMachine *the) {
+	spiDisplay sd = xsmcGetHostData(xsThis);
+	g_ScreenBrightness = (uint8_t)xsmcToInteger(xsArg(0));
+	sh8601zCommand( sd, SH8601Z_CMD_BRIGHTNESS, &g_ScreenBrightness, 1, false );
+}
+
+
+void xs_sh8601z_get_enabled(xsMachine *the) {
+	xsmcSetInteger(xsResult, g_IsScreenEnabled );
+}
+
+void xs_sh8601z_set_enabled(xsMachine *the) {
+	spiDisplay sd = xsmcGetHostData(xsThis);
+	g_IsScreenEnabled = (uint8_t)xsmcToBoolean(xsArg(0));
+	sh8601zCommand( 
+		sd, 
+		g_IsScreenEnabled ? SH8601Z_CMD_DISPLAYON : SH8601Z_CMD_DISPLAYOFF, 
+		NULL, 0, 
+		false
+	 );
+}
+
+void xs_sh8601z_get_sleep(xsMachine *the) {
+	xsmcSetInteger(xsResult, !g_IsScreenAwake );
+}
+
+void xs_sh8601z_set_sleep(xsMachine *the) {
+	spiDisplay sd = xsmcGetHostData(xsThis);
+	g_IsScreenAwake = !(uint8_t)xsmcToBoolean(xsArg(0));
+	sh8601zCommand( 
+		sd, 
+		g_IsScreenAwake ? SH8601Z_CMD_SLEEPOUT : SH8601Z_CMD_SLEEPIN, 
+		NULL, 0, 
+		false
+	 );
+}
+
+
 void xs_sh8601z_get_clut(xsMachine *the)
 {
 	// returns undefined
@@ -275,24 +345,24 @@ void xs_sh8601z_get_c_dispatch(xsMachine *the)
 // caller provides little-endian pixels, convert to big-endian for display
 void sh8601zSend_16LE(PocoPixel *pixels, int byteLength, void *refcon)
 {
-	fxReport(gThe, "sh8601zSend_16LE(...)\n");
+	modLog("sh8601zSend_16LE(...)");
 	spiDisplay sd = refcon;
 	modSPITxSwap16(&sd->spiConfig, (void *)pixels, (byteLength < 0) ? -byteLength : byteLength);
 }
 #endif
 
-void sh8601zCommand(spiDisplay sd, uint8_t command, const uint8_t *data, uint16_t count)
+void sh8601zCommand(spiDisplay sd, uint8_t command, const uint8_t *data, uint16_t count, bool qspi)
 {
-	fxReport(gThe, "sh8601zCommand(...)\n");
+	modLog("sh8601zCommand(...)");
 	/* HACK */
-	modSPIFlush();
+	//modSPIFlush();
 
 	// 32-bit aligned command segment + 32-byte data buffer
 	uint8_t cmd32_data[ 4 + 32 ];
 	memset(&cmd32_data, 0x00, sizeof(cmd32_data));
 
 	// format command header (LSB)
-	cmd32_data[0] = 0x02;
+	cmd32_data[0] = qspi ? 0x32 : 0x02;
 	cmd32_data[1] = 0x00;
 	cmd32_data[2] = command;
 	cmd32_data[3] = 0x00;
@@ -310,23 +380,30 @@ void sh8601zCommand(spiDisplay sd, uint8_t command, const uint8_t *data, uint16_
 
 void xs_sh8601z_command(xsMachine *the)
 {
-	xsLog("xs_sh8601z_command()\n");
+	modLog("xs_sh8601z_command()");
 	spiDisplay sd = xsmcGetHostData(xsThis);
 	uint8_t command = (uint8_t)xsmcToInteger(xsArg(0));
 	uint16_t dataSize = 0;
 	uint8_t *data = NULL;
+	bool qspi = false;
 
 	if (xsmcArgc > 1) {
 		dataSize = (uint16_t)xsmcGetArrayBufferLength(xsArg(1));
 		data = xsmcToArrayBuffer(xsArg(1));
 	}
 
-	sh8601zCommand(sd, command, data, dataSize);
+	if (xsmcArgc > 2) {
+		qspi = xsmcToInteger(xsArg(2));
+	}
+
+	sh8601zCommand(sd, command, data, dataSize, qspi);
 }
 
 void sh8601zInit(spiDisplay sd)
 {
-	fxReport(gThe, "sh8601zInit(...)\n");
+	modLog("sh8601zInit(...) - QSPI");
+	modLogInt( sd->spiConfig.quad );
+
 	uint8_t i = 0;
 
 	SCREEN_CS_INIT;
@@ -355,7 +432,7 @@ void sh8601zInit(spiDisplay sd)
 			i += count;
 		}
 
-		sh8601zCommand(sd, command, data, count);
+		sh8601zCommand(sd, command, data, count, false);
 		modDelayMicroseconds( 1000 );
 	}
 
@@ -364,7 +441,7 @@ void sh8601zInit(spiDisplay sd)
 
 void sh8601zChipSelect(uint8_t active, modSPIConfiguration config)
 {
-	fxReport(gThe, "sh8601zChipSelect(...)\n");
+	modLog("sh8601zChipSelect(...)");
 	return;
 	spiDisplay sd = (spiDisplay)(((char *)config) - offsetof(spiDisplayRecord, spiConfig));
 
@@ -376,7 +453,7 @@ void sh8601zChipSelect(uint8_t active, modSPIConfiguration config)
 
 void sh8601zBegin(void *refcon, CommodettoCoordinate x, CommodettoCoordinate y, CommodettoDimension w, CommodettoDimension h)
 {
-	fxReport(gThe, "sh8601zBegin(...)\n");
+	modLog("sh8601zBegin(...)");
 
 	spiDisplay sd = refcon;
 	uint8_t data[4];
@@ -391,16 +468,16 @@ void sh8601zBegin(void *refcon, CommodettoCoordinate x, CommodettoCoordinate y, 
 	data[1] = xMin & 0xFF;
 	data[2] = xMax >> 8;
 	data[3] = xMax & 0xFF;
-	sh8601zCommand(sd, SH8601Z_CMD_SETCOLUMN, data, sizeof(data));
+	sh8601zCommand(sd, SH8601Z_CMD_SETCOLUMN, data, sizeof(data), false);
 
 	data[0] = yMin >> 8;
 	data[1] = yMin & 0xFF;
 	data[2] = yMax >> 8;
 	data[3] = yMax & 0xFF;
-	sh8601zCommand(sd, SH8601Z_CMD_SETROW, data, sizeof(data));
+	sh8601zCommand(sd, SH8601Z_CMD_SETROW, data, sizeof(data), false);
 	
 	g_IsStreaming = true;
-	sh8601zCommand(sd, SH8601Z_CMD_WRITERAM, NULL, 0);
+	sh8601zCommand(sd, SH8601Z_CMD_WRITERAM, NULL, 0, sd->spiConfig.quad);
 }
 
 void sh8601zContinue(void *refcon)

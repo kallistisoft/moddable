@@ -46,13 +46,22 @@ export default class SH8601Z @ "xs_sh8601z_destructor" {
 	get height() @ "xs_sh8601z_get_height";
 	get async() {return true;}
 
+	get brightness() @ "xs_sh8601z_get_brightness";
+	set brightness() @ "xs_sh8601z_set_brightness";
+
+	get enabled() @ "xs_sh8601z_get_enabled";
+	set enabled() @ "xs_sh8601z_set_enabled";
+
+	get sleep() @ "xs_sh8601z_get_sleep";
+	set sleep() @ "xs_sh8601z_set_sleep";
+
 	get clut() @ "xs_sh8601z_get_clut";
 	set clut() @ "xs_sh8601z_set_clut";
 
 	get c_dispatch() @ "xs_sh8601z_get_c_dispatch";
 	
 	// driver specific
-	command(id, data) @ "xs_sh8601z_command";	
+	command(id, data, qspi) @ "xs_sh8601z_command";	
 }
 
 Object.freeze(SH8601Z.prototype);
