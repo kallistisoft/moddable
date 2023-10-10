@@ -1,7 +1,9 @@
 /*
+ * Copyright (c) 2023  Pocuter Inc. -- QSPI Implementation
+ *
  * Copyright (c) 2016-2021  Moddable Tech, Inc.
  *
- *   This file is part of the Moddable SDK Runtime.
+ *   This file is part of the Moddable SDK Runtime.modSPITxRx
  * 
  *   The Moddable SDK Runtime is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU Lesser General Public License as published by
@@ -32,6 +34,10 @@
 
 #include "semphr.h"
 
+#define modLog(foo)
+#define modLogInt(foo)
+#define modLogHex(foo)
+
 #ifndef MODDEF_SPI_MISO_PIN
 	#define MODDEF_SPI_MISO_PIN	12
 #endif
@@ -41,12 +47,28 @@
 #ifndef MODDEF_SPI_SCK_PIN
 	#define MODDEF_SPI_SCK_PIN	14
 #endif
+#ifndef MODDEF_SPI_QUAD
+	#define MODDEF_SPI_QUAD		(0)
+#endif
+#ifndef MODDEF_SPI_IO0_PIN
+	#define MODDEF_SPI_IO0_PIN	(-1)
+#endif
+#ifndef MODDEF_SPI_IO1_PIN
+	#define MODDEF_SPI_IO0_PIN	(-1)
+#endif
+#ifndef MODDEF_SPI_IO2_PIN
+	#define MODDEF_SPI_IO0_PIN	(-1)
+#endif
+#ifndef MODDEF_SPI_IO3_PIN
+	#define MODDEF_SPI_IO0_PIN	(-1)
+#endif
 #ifndef MODDEF_SPI_ESP32_TRANSACTIONS
 	#define MODDEF_SPI_ESP32_TRANSACTIONS (3)
 #endif
 #ifndef MODDEF_SPI_ESP32_TRANSACTIONSIZE
 	#define MODDEF_SPI_ESP32_TRANSACTIONSIZE (1024)
 #endif
+
 
 typedef uint32_t (*modSPIBufferLoader)(uint8_t *data, uint32_t bytes, uint32_t *bitsOut);
 
@@ -76,9 +98,22 @@ uint32_t *gSPITransactionBuffer[kTransactions];
 static TaskHandle_t gSPITask;
 static SemaphoreHandle_t gSPIMutex;
 
+static void IRAM_ATTR LogSPIError( esp_err_t err ) {
+	switch( err ) {
+		case ESP_ERR_INVALID_ARG: modLog("ESP_ERR_INVALID_ARG"); break;
+		case ESP_ERR_TIMEOUT: modLog("ESP_ERR_TIMEOUT"); break;
+		case ESP_ERR_NO_MEM: modLog("ESP_ERR_NO_MEM"); break;
+		case ESP_ERR_INVALID_STATE: modLog("ESP_ERR_INVALID_STATE"); break;
+		case ESP_OK: modLog("ESP_OK"); break;
+		default:
+			modLog("ESP_ERROR_UNKOWN");
+	}
+}
+
 static void IRAM_ATTR queueTransfer(modSPIConfiguration config)
 {
-    uint32_t bitsOut;
+	modLog("queueTransfer()...");
+	uint32_t bitsOut;
     uint16_t loaded;
     spi_transaction_t *trans = &gTransaction[gTransactionIndex];
 
@@ -86,21 +121,43 @@ static void IRAM_ATTR queueTransfer(modSPIConfiguration config)
     gSPIDataCount -= loaded;
     gSPIData += loaded;
 
-    trans->flags = 0;
-    trans->cmd = 0;
-    trans->addr = 0;
+	esp_err_t err;
+
+	// clear transaction fields and set tx length/buffer
+	memset( trans, 0, sizeof(spi_transaction_t) );
     trans->length = bitsOut;
-    trans->rxlength = 0;
-    trans->user = 0;
     trans->tx_buffer = gSPITransactionBuffer[gTransactionIndex];
-    trans->rx_buffer = NULL;
+
+	if( config->quad ) {
+		spi_device_handle_t	device = config->qspi_dev;
+		modLog("queueTransfer()...quad-sync start");
+		trans->flags = SPI_TRANS_MODE_QIO;
+		spi_device_acquire_bus( device, portMAX_DELAY );
+		err = spi_device_transmit(device, trans);
+		spi_device_release_bus(device);
+		LogSPIError( err );
+		modLog("queueTransfer()...quad-sync end");
+		return;
+	}
 
 	gTransactionsPending += 1;
     gTransactionIndex += 1;
     if (gTransactionIndex >= kTransactions)
         gTransactionIndex = 0;
 
-	spi_device_queue_trans(config->spi_dev, trans, portMAX_DELAY);
+	if( config->quad ) {
+		modLog("queueTransfer()...quad");
+		modLogHex(config->qspi_dev);
+		trans->flags = SPI_TRANS_MODE_QIO;
+		err = spi_device_queue_trans(config->qspi_dev, trans, portMAX_DELAY);
+		modLog("queueTransfer()...quad - sent");
+		LogSPIError( err );
+	} else {
+		modLog("queueTransfer()...spi");
+		err = spi_device_queue_trans(config->spi_dev, trans, portMAX_DELAY);
+		modLog("queueTransfer()...spi - sent");
+		LogSPIError( err );
+	}
 }
 
 void spiLoop(void *pvParameter)
@@ -108,18 +165,25 @@ void spiLoop(void *pvParameter)
 	while (true) {
 		uint32_t newState;
 		spi_transaction_t *ret_trans;
-
+		
+		//modLog("spiLoop()...notfy take - start");
 		xTaskNotifyWait(0, 0, &newState, portMAX_DELAY);
 		xSemaphoreTake(gSPIMutex, portMAX_DELAY);
+		//modLog("spiLoop()...notfy take - end");
 
 		if (!gConfig) {
 			xSemaphoreGive(gSPIMutex);
 			continue;
 		}
 
-		while (gTransactionsPending && (ESP_OK == spi_device_get_trans_result(gConfig->spi_dev, &ret_trans, 0)))
+		spi_device_handle_t spi_device = gConfig->quad ? gConfig->qspi_dev : gConfig->spi_dev;
+		
+		modLog("spiLoop()...wait - start");
+		while (gTransactionsPending && (ESP_OK == spi_device_get_trans_result( spi_device , &ret_trans, 0)))
 			gTransactionsPending -= 1;
+		modLog("spiLoop()...wait - end");
 
+		// HACK -- Does this code ever get run????
 		while ((gSPIDataCount > 0) && (gTransactionsPending < kTransactions))
 			queueTransfer(gConfig);
 
@@ -151,6 +215,17 @@ static void IRAM_ATTR postTransfer(spi_transaction_t *transIn)
 
 static uint8_t gSPIInited;
 
+void LogSPIDeviceCFG( spi_device_interface_config_t *cfg ) {
+	modLog("device.clock_speed_hz"); modLogHex(cfg->clock_speed_hz);
+	modLog("device.mode"); modLogHex(cfg->mode);
+	modLog("device.spics_io_num"); modLogHex(cfg->spics_io_num);
+	modLog("device.queue_size"); modLogHex(cfg->queue_size);
+	modLog("device.pre_cb"); modLogHex(cfg->pre_cb);
+	modLog("device.post_cb"); modLogHex(cfg->post_cb);
+	modLog("device.input_delay_ns"); modLogHex(cfg->input_delay_ns);
+	modLog("device.flags"); modLogHex(cfg->flags);
+}
+
 void modSPIInit(modSPIConfiguration config)
 {
 	esp_err_t ret;
@@ -162,13 +237,35 @@ void modSPIInit(modSPIConfiguration config)
         gSPITransactionBuffer[0] = heap_caps_malloc(SPI_BUFFER_SIZE * kTransactions, MALLOC_CAP_DMA);      // use DMA capable memory for SPI driver
         for (i = 1; i < kTransactions; i++)
             gSPITransactionBuffer[i] = (uint32_t *)(SPI_BUFFER_SIZE + (uint8_t *)gSPITransactionBuffer[i - 1]);
+		
 		memset(&buscfg, 0, sizeof(buscfg));
-		buscfg.miso_io_num = (254 == config->miso_pin) ? MODDEF_SPI_MISO_PIN : ((255 == config->miso_pin) ? -1 : config->miso_pin);
-		buscfg.mosi_io_num = (254 == config->mosi_pin) ? MODDEF_SPI_MOSI_PIN : ((255 == config->mosi_pin) ? -1 : config->mosi_pin);
+		buscfg.max_transfer_sz = MODDEF_SPI_ESP32_TRANSACTIONSIZE;
 		buscfg.sclk_io_num = (254 == config->clock_pin) ? MODDEF_SPI_SCK_PIN : ((255 == config->clock_pin) ? -1 : config->clock_pin);
-		buscfg.quadwp_io_num = -1;
-		buscfg.quadhd_io_num = -1;
-        buscfg.max_transfer_sz = MODDEF_SPI_ESP32_TRANSACTIONSIZE;
+
+		if( config->quad ) {
+			buscfg.data0_io_num = (254 == config->io0_pin) ? MODDEF_SPI_IO0_PIN : ((255 == config->io0_pin) ? -1 : config->io0_pin);
+			buscfg.data1_io_num = (254 == config->io1_pin) ? MODDEF_SPI_IO1_PIN : ((255 == config->io1_pin) ? -1 : config->io1_pin);
+			buscfg.data2_io_num = (254 == config->io2_pin) ? MODDEF_SPI_IO2_PIN : ((255 == config->io2_pin) ? -1 : config->io2_pin);
+			buscfg.data3_io_num = (254 == config->io3_pin) ? MODDEF_SPI_IO3_PIN : ((255 == config->io3_pin) ? -1 : config->io3_pin);
+			buscfg.flags = SPICOMMON_BUSFLAG_QUAD;
+		} else {
+			buscfg.miso_io_num = (254 == config->miso_pin) ? MODDEF_SPI_MISO_PIN : ((255 == config->miso_pin) ? -1 : config->miso_pin);
+			buscfg.mosi_io_num = (254 == config->mosi_pin) ? MODDEF_SPI_MOSI_PIN : ((255 == config->mosi_pin) ? -1 : config->mosi_pin);
+			buscfg.quadwp_io_num = -1;
+			buscfg.quadhd_io_num = -1;
+		}
+
+		modLog("modSPIInit(): buscfg.max_transfer_sz"); modLogInt(buscfg.max_transfer_sz);
+		modLog("modSPIInit(): buscfg.sclk_io_num"); modLogInt(buscfg.sclk_io_num);
+		modLog("modSPIInit(): buscfg.data0_io_num"); modLogInt(buscfg.data0_io_num);
+		modLog("modSPIInit(): buscfg.data1_io_num"); modLogInt(buscfg.data1_io_num);
+		modLog("modSPIInit(): buscfg.data2_io_num"); modLogInt(buscfg.data2_io_num);
+		modLog("modSPIInit(): buscfg.data3_io_num"); modLogInt(buscfg.data3_io_num);
+		modLog("modSPIInit(): buscfg.miso_io_num"); modLogInt(buscfg.miso_io_num);
+		modLog("modSPIInit(): buscfg.mosi_io_num"); modLogInt(buscfg.mosi_io_num);
+		modLog("modSPIInit(): buscfg.quadwp_io_num"); modLogInt(buscfg.quadwp_io_num);
+		modLog("modSPIInit(): buscfg.quadhd_io_num"); modLogInt(buscfg.quadhd_io_num);		
+
 
 	#if kCPUESP32S3 || kCPUESP32C3 || kCPUESP32C6 || kCPUESP32H2
 		ret = spi_bus_initialize(config->spiPort, &buscfg, SPI_DMA_CH_AUTO);
@@ -190,17 +287,29 @@ void modSPIInit(modSPIConfiguration config)
 		xTaskCreate(spiLoop, "spiLoop", 2048 + XT_STACK_EXTRA_CLIB, NULL, 10, &gSPITask);
 	}
 
+	// initialize SPI device interface
     spi_device_interface_config_t devcfg;
-	memset(&devcfg, 0, sizeof(devcfg));
+	memset(&devcfg, 0, sizeof(spi_device_interface_config_t));
 	devcfg.clock_speed_hz = config->hz;
 	devcfg.mode = config->mode & 3;
 	devcfg.spics_io_num = config->cs_pin;		// set to -1 if none
 	devcfg.queue_size = kTransactions;
 	devcfg.pre_cb = NULL;
-	devcfg.post_cb = postTransfer;
+	devcfg.post_cb = config->quad ? NULL : postTransfer;
 	devcfg.input_delay_ns = config->miso_delay;
-
 	ret = spi_bus_add_device(config->spiPort, &devcfg, &config->spi_dev);
+	modLog("Device Config - 1WIRE");
+	LogSPIDeviceCFG( &devcfg );
+
+	// initialize QSPI device interface
+	if( !ret && config->quad ) {
+		devcfg.flags = SPI_DEVICE_HALFDUPLEX;	
+		ret = spi_bus_add_device(config->spiPort, &devcfg, &config->qspi_dev);
+		assert( config->qspi_dev != 0 );
+		modLog("Device Config - QSPI");
+		LogSPIDeviceCFG( &devcfg );
+	}
+
 	if (ret) {
         free(gSPITransactionBuffer[0]);
         gSPITransactionBuffer[0] = NULL;
@@ -219,6 +328,11 @@ void modSPIUninit(modSPIConfiguration config)
 	if (config->spi_dev) {
 		spi_bus_remove_device(config->spi_dev);
 		config->spi_dev = NULL;
+	}
+
+	if (config->qspi_dev) {
+		spi_bus_remove_device(config->qspi_dev);
+		config->qspi_dev = NULL;
 	}
 
 	gSPIInited -= 1;
@@ -242,11 +356,11 @@ void modSPIActivateConfiguration(modSPIConfiguration config)
 	if (config == gConfig)
 		return;
 
-	if (gConfig)
+	if (gConfig && gConfig->doChipSelect != NULL )
 		(gConfig->doChipSelect)(0, gConfig);
 
 	gConfig = config;
-	if (gConfig)
+	if (gConfig && gConfig->doChipSelect != NULL )
 		(gConfig->doChipSelect)(1, gConfig);
 }
 

@@ -1,0 +1,30 @@
+{
+	"defines": {
+		"sh8601z": {
+			"width": 368,
+			"height": 448
+		}
+	},
+	"preload": [
+		"sh8601z",
+		"commodetto/Bitmap"
+	],
+	"platforms": {
+		"esp32": {
+			"include": [
+				"$(MODULES)/pins/digital/manifest.json",
+				"$(MODULES)/pins/spi/manifest.json"
+			],
+			"modules": {
+				"*": "$(MODULES)/drivers/sh8601z/*",
+				"commodetto/Bitmap": "$(COMMODETTO)/commodettoBitmap"
+			},
+			"defines": {
+				"sh8601z": {
+					"spi_port": 1,					
+					"cs_pin": 10
+				}
+			}
+		}
+	}
+}
