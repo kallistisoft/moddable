@@ -130,7 +130,7 @@ void xs_FT5X16(xsMachine *the)
 	/* HACK HACK HACK HACK HACK HACK HACK HACK */
 	if (err) {
 		//xsUnknownError("write FT5X16_REG_VENDID failed");
-		modLog("write FT5X16_REG_VENDID failed")
+		modLog("write FT5X16_REG_VENDID failed");
 		return;
 	}
 	/* HACK HACK HACK HACK HACK HACK HACK HACK */
@@ -187,7 +187,7 @@ void xs_FT5X16_read(xsMachine *the)
 	err = modI2CWrite(&ft->i2c, data, 1, false);
 	if (err) {
 		//xsUnknownError("write FT5X16_REG_NUMTOUCHES failed");
-		modLog("write FT5X16_REG_NUMTOUCHES failed")
+		modLog("write FT5X16_REG_NUMTOUCHES failed");
 		return;
 	}
 
